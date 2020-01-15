@@ -1,0 +1,436 @@
+#!/bin/sh
+
+#Variables
+
+host_mgmt_ip=10.0.0.10
+controller_mgmt_ip=10.0.0.1
+
+admin_pass="admin"
+rabbit_pass="random"
+keystone_db_pass="random"
+glance_db_pass="random"
+placement_db_pass="random"
+nova_db_pass="random"
+
+glance_pass="glance"
+placement_pass="placement"
+nova_pass="nova"
+neutron_pass="neutron"
+
+############################################################
+
+
+#INFORMATION
+#Due to the necesse
+# STILL HAVE TO SOURCE THE CREDENTIALS!!!!!!!!!
+
+
+
+############################################################
+
+
+
+#CONTROLNODE FUNCTIONS
+
+#Install keystone
+install_keystone()
+{
+	echo "Installing Keystone"
+	
+	mysql
+	CREATE DATABASE keystone;
+	GRANT ALL PRIVILEGES ON keystone.* TO 'keystone'@'localhost' IDENTIFIED BY "$keystone_db_pass";
+        GRANT ALL PRIVILEGES ON keystone.* TO 'keystone'@'%' IDENTIFIED BY "$keystone_db_pass";
+
+	#install keystone
+	apt install keystone
+
+	sed -i -e 's+.*connection = .*+connection = mysql+pymysql://keystone:'"$keystone_db_pass"'@'"$controller_mgmt_ip"'/keystone+' /etc/keystone/keystone.conf
+	sed -i -e 's+.*provider = .*+provider = fernet+' /etc/keystone/keystone.conf
+	
+	#tirei daqui um su -s
+	/bin/sh -c "keystone-manage db_sync" keystone
+	
+	keystone-manage fernet_setup --keystone-user keystone --keystone-group keystone
+	
+	keystone-manage credential_setup --keystone-user keystone --keystone-group keystone
+	
+	keystone-manage bootstrap --bootstrap-password "$admin_pass" --bootstrap-admin-url http://"$controller_mgmt_ip":5000/v3/ --bootstrap-internal-url http://"$controller_mgmt_ip":5000/v3/ --bootstrap-public-url http://"$controller_mgmt_ip":000/v3/ --bootstrap-region-id RegionOne
+
+	#edit Apache /etc/apache2/apache2.conf
+	sed -i -e 's+.*ServerName.*+ServerName '"$controller_mgmt_ip"'+' /etc/apache2/apache2.conf
+
+	service apache2 restart 
+
+}
+
+#Install glance
+install_glance()
+{
+	echo "Installing Glance"
+	mysql
+	CREATE DATABASE glance;
+	GRANT ALL PRIVILEGES ON glance.* TO 'glance'@'localhost' IDENTIFIED BY "$glance_db_pass";
+	GRANT ALL PRIVILEGES ON glance.* TO 'glance'@'%' IDENTIFIED BY "$glance_db_pass";
+
+	openstack user create --domain default --password "$glance_pass"	 
+	openstack role add --project service --user glance admin
+	openstack service create --name glance --description "OpenStack Image" image
+	openstack endpoint create --region RegionOne image public http://"$controller_mgmt_ip":9292
+        openstack endpoint create --region RegionOne image internal http://"$controller_mgmt_ip":9292
+	openstack endpoint create --region RegionOne image admin http://"$controller_mgmt_ip":9292
+
+	apt install glance
+	sed -i -e 's+.*connection = .*+connection = mysql+pymysql://keystone:'"$glance_db_pass"'@'"$controller_mgmt_ip"'/glance+' /etc/glance/glance-api.conf
+
+	sed -i -e 's+.*www_authenticate_uri.*+www_authenticate_uri = http://'"$controller_mgmt_ip"':5000+' /etc/glance/glance-api.conf
+	sed -i -e 's+.*auth_url.*+auth_url = http://'"$controller_mgmt_ip"':5000+' /etc/glance/glance-api.conf
+	sed -i -e 's+.*memcached_servers.*+memcached_servers = '"$controller_mgmt_ip"':11211+' /etc/glance/glance-api.conf
+	sed -i -e 's+.*auth_type.*+auth_type = password+' /etc/glance/glance-api.conf
+	sed -i -e 's+.*project_domain_name.*+project_domain_name = Default+' /etc/glance/glance-api.conf
+	sed -i -e 's+.*user_domain_name.*+user_domain_name = Default+' /etc/glance/glance-api.conf
+	sed -i -e 's+.*project_name.*+project_name = service+' /etc/glance/glance-api.conf
+	sed -i -e 's+.*username.*+username = glance+' /etc/glance/glance-api.conf
+	sed -i -e 's+.*password.*+password = '"$glance_pass"'+' /etc/glance/glance-api.conf
+	sed -i -e 's+.*stores.*+stores = file,http+' /etc/glance/glance-api.conf
+	sed -i -e 's+.*default_store.*+default_store = file+' /etc/glance/glance-api.conf
+	sed -i -e 's+.*filesystem_store_datadir.*+filesystem_store_datadir = /var/lib/glance/images+' /etc/glance/glance-api.conf
+ 
+	#falta su -s	
+	/bin/sh -c "glance-manage db_sync" glance
+	service glance-api restart
+
+}	
+
+#Install placement
+install_placement()
+{
+	echo "Installing placement API"
+	mysql
+	CREATE DATABASE placement;
+	GRANT ALL PRIVILEGES ON placement.* TO 'placement'@'localhost' IDENTIFIED BY "$placement_db_pass";
+	GRANT ALL PRIVILEGES ON placement.* TO 'placement'@'%' IDENTIFIED BY "$placement_db_pass";
+        
+	openstack user create --domain default --password "$placement_pass" placement #tirar daqui este prompt
+	openstack role add --project service --user placement admin
+	openstack service create --name placement  --description "Placement API" placement
+	openstack endpoint create --region RegionOne  placement public http://"$controller_mgmt_ip":8778
+	openstack endpoint create --region RegionOne  placement internal http://"$controller_mgmt_ip":8778
+	openstack endpoint create --region RegionOne placement admin http://"$controller_mgmt_ip":8778
+
+	apt install placement-api
+
+	#Edit the /etc/placement/placement.conf file and complete the following actions: https://docs.openstack.org/placement/train/install/install-ubuntu.html
+        sed -i -e 's+.*connection = .*+connection = mysql+pymysql://keystone:'"$placement_db_pass"'@'"$controller_mgmt_ip"'/placement+' /etc/placement/placement.conf
+
+	sed -i -e 's+.*auth_strategy.*+auth_strategy = keystone+' /etc/placement/placement.conf
+	
+	sed -i -e 's+.*auth_url.*+auth_url = http://'"$controller_mgmt_ip"':5000+' /etc/placement/placement.conf
+	sed -i -e 's+.*memcached_servers.*+memcached_servers = '"$controller_mgmt_ip"':11211+' /etc/placement/placement.conf        
+	sed -i -e 's+.*auth_type.*+auth_type = password+' /etc/placement/placement.conf
+        sed -i -e 's+.*project_domain_name.*+project_domain_name = Default+' /etc/placement/placement.conf
+        sed -i -e 's+.*user_domain_name.*+user_domain_name = Default+' /etc/placement/placement.conf
+        sed -i -e 's+.*project_name.*+project_name = service+' /etc/placement/placement.conf
+        sed -i -e 's+.*username.*+username = glance+' /etc/placement/placement.conf
+        sed -i -e 's+.*password.*+password = '"$glance_pass"'+' /etc/placement/placement.conf
+
+
+	#tirei daqui su -s
+	/bin/sh -c "placement-manage db sync" placement
+	service apache2 restart
+}
+
+
+#Nova
+install_nova_controller()
+{
+	echo "Installing Nova on the Control Node"
+
+	mysql
+	CREATE DATABASE nova_api;
+	CREATE DATABASE nova;
+	CREATE DATABASE nova_cell0;
+	GRANT ALL PRIVILEGES ON nova_api.* TO 'nova'@'localhost' IDENTIFIED BY "$nova_db_pass";
+	GRANT ALL PRIVILEGES ON nova_api.* TO 'nova'@'%' IDENTIFIED BY "$nova_db_pass";
+	GRANT ALL PRIVILEGES ON nova.* TO 'nova'@'localhost' IDENTIFIED BY "$nova_db_pass";
+	GRANT ALL PRIVILEGES ON nova.* TO 'nova'@'%' IDENTIFIED BY "$nova_db_pass";
+	GRANT ALL PRIVILEGES ON nova_cell0.* TO 'nova'@'localhost' IDENTIFIED BY "$nova_db_pass";
+	GRANT ALL PRIVILEGES ON nova_cell0.* TO 'nova'@'%'  IDENTIFIED BY "$nova_db_pass";
+
+	openstack user create --domain default --password "$nova_pass" nova 
+	openstack role add --project service --user nova admin
+	openstack service create --name nova  --description "OpenStack Compute" compute
+	openstack endpoint create --region RegionOne  compute public http://"$controller_ip_mgmt":8774/v2.1
+	openstack endpoint create --region RegionOne  compute internal http://"$controller_mgmt_ip":8774/v2.1
+	openstack endpoint create --region RegionOne  compute admin http://"$controller_mgmt_ip":8774/v2.1
+
+	apt install nova-api nova-conductor nova-novncproxy nova-scheduler
+	#Edit the /etc/nova/nova.conf file and complete the following actions: https://docs.openstack.org/nova/train/install/controller-install-ubuntu.html
+
+
+
+
+	su -s /bin/sh -c "nova-manage api_db sync" nova
+	su -s /bin/sh -c "nova-manage cell_v2 map_cell0" nova
+	su -s /bin/sh -c "nova-manage cell_v2 create_cell --name=cell1 --verbose" nova
+	su -s /bin/sh -c "nova-manage db sync" nova
+
+	service nova-api restart
+	service nova-scheduler restart
+	service nova-conductor restart
+	service nova-novncproxy restart
+
+
+	#run to discover compute nodes
+	#su -s /bin/sh -c "nova-manage cell_v2 discover_hosts --verbose" nova
+	
+	#or perioducally schedule
+
+	#[scheduler]
+	#discover_hosts_in_cells_interval = 300
+}
+
+#Neutron
+install_neutron_controller()
+{
+
+	echo "Installing Neutron on Controller Node"
+	mysql -u root -p
+	CREATE DATABASE neutron;
+	GRANT ALL PRIVILEGES ON neutron.* TO 'neutron'@'localhost' IDENTIFIED BY "$neutron_db_pass";
+	GRANT ALL PRIVILEGES ON neutron.* TO 'neutron'@'%' IDENTIFIED BY "$neutron_db_pass";
+
+	openstack user create --domain default --password-prompt neutron #password prompt
+	openstack role add --project service --user neutron admin
+	openstack service create --name neutron --description "OpenStack Networking" network
+	openstack endpoint create --region RegionOne network public http://"$controller_node_ip":9696
+	openstack endpoint create --region RegionOne network internal http://"$controller_node_ip":9696
+	openstack endpoint create --region RegionOne network admin http://"$controller_node_ip":9696
+
+
+	# TENHO DE FAZER AQUI AINDA TODA A PARTE DO BRIDGING E ETC
+
+
+
+	# Edit the /etc/neutron/metadata_agent.ini file and complete the following actions: https://docs.openstack.org/neutron/train/install/controller-install-ubuntu.html
+
+
+	#Edit the /etc/nova/nova.conf file and perform the following actions:
+
+
+	#finalize 
+	su -s /bin/sh -c "neutron-db-manage --config-file /etc/neutron/neutron.conf --config-file /etc/neutron/plugins/ml2/ml2_conf.ini upgrade head" neutron 
+	service nova-api restart
+	service neutron-server restart
+	service neutron-linuxbridge-agent restart
+	service neutron-dhcp-agent restart
+	service neutron-metadata-agent restart
+	service neutron-l3-agent restart
+
+
+}
+
+install_horizon()
+{
+
+	
+
+}
+
+
+##################################################################
+
+
+#COMPUTE NODE FUNCTIONS
+#Nova
+install_nova_compute(){
+
+	echo "Installing Nova on Compute Node"
+	apt install nova-compute
+
+ 	#Edit the /etc/nova/nova.conf file and complete the following actions: https://docs.openstack.org/nova/train/install/compute-install-ubuntu.html
+
+	#ver detalhes do qemu
+	sed -i -e 's+.*transport_url.*+transport_url = rabbit://openstack:'"$rabbit_pass"'@'"$controller_mgmt_ip"'+' /etc/nova/nova.conf
+
+	sed -i -e 's+.*auth_strategy.*+auth_strategy = keystone+' /etc/nova/nova.conf
+
+        sed -i -e 's+.*auth_url.*+auth_url = http://'"$controller_mgmt_ip"':5000+' /etc/nova/nova.conf
+        sed -i -e 's+.*memcached_servers.*+memcached_servers = '"$controller_mgmt_ip"':11211+' /etc/nova/nova.con
+        sed -i -e 's+.*auth_type.*+auth_type = password+' /etc/nova/nova.conf
+        sed -i -e 's+.*project_domain_name.*+project_domain_name = Default+' /etc/nova/nova.conf
+        sed -i -e 's+.*user_domain_name.*+user_domain_name = Default+' /etc/nova/nova.conf
+        sed -i -e 's+.*project_name.*+project_name = service+' /etc/nova/nova.conf
+        sed -i -e 's+.*username.*+username = glance+' /etc/nova/nova.conf
+        sed -i -e 's+.*password.*+password = '"$nova_pass"'+' /etc/nova/nova.conf
+
+
+	sed -i -e 's+.*my_ip.*+my_ip = '"$host_mgmt_ip"'+' /etc/nova/nova.conf
+	sed -i -e 's+.*use_neutron.*+use_neutron = true+' /etc/nova/nova.conf
+	sed -i -e 's+.*firewall_driver.*+firewall_driver = nova.virt.firewall.NoopFirewallDriver+' /etc/nova/nova.conf
+
+	
+	sed -i -e 's+.*enabled.*+enabled = true+' /etc/nova/nova.conf
+	sed -i -e 's+.*server_listen.*+server_listen = 0.0.0.0+' /etc/nova/nova.conf
+	sed -i -e 's+.*server_proxyclient_address.*+server_proxyclient_address = '"$host_mgmt_ip"'+' /etc/nova/nova.conf
+	sed -i -e 's+.*novncproxy_base_url.*+novncproxy_base_url = http://'"$controller_mgmt_ip"':6080/vnc_auto.html+' /etc/nova/nova.conf
+
+	 
+	sed -i -e 's+.*api_servers.*+api_servers = http://'"$controller_mgmt_ip"'+' /etc/nova/nova.conf
+	sed -i -e 's+.*lock_path.*+lock_path = /var/lib/nova/tmp+' /etc/nova/nova.conf
+
+	#falta descobrir como tratar cenas do placement (talvez quando der match subtuit o bloco todo, pode ser que o resto esteja comentado e evita-se problema)
+
+
+	service nova-compute restart
+
+}
+
+#Neutron
+install_neutron_compute(){
+
+	echo "Installing Neutron on Compute Node"
+	
+	apt install neutron-linuxbridge-agent
+	#Edit the /etc/neutron/neutron.conf file and complete the following actions:
+
+	# TENHO DE FAZER AQUI AINDA TODA A PARTE DO BRIDGING E ETC
+
+	#Edit the /etc/nova/nova.conf file and complete the following actions:
+
+	service nova-compute restart
+	service neutron-linuxbridge-agent restart
+
+}
+	
+
+##################################################################################3
+
+#Install pre-requisites
+
+#Install ntp
+install_NTP()
+{
+	echo "Installing NTP"
+}
+
+
+install_requisites()
+{
+	echo "Installing pre-requisites"
+        
+	#ntp
+	echo "Install NTP ? (y/N)"
+	read varname
+	case $varname in
+            y)
+            install_NTP
+	    ;;
+            N)
+            echo "Skipping NTP"
+	    ;;
+	esac
+
+	#add cloud-archieve
+	#add-apt-repository cloud-archive:stein
+        add-apt-repository universe
+	apt update -y
+	apt install -y python3-openstackclient
+
+	#mysql
+	apt install -y  mariadb-server
+	apt install -y python-pymysql
+
+		
+	#edit mariadb conf
+	touch /etc/mysql/mariadb.conf.d/99-openstack.cnf
+	echo '[mysqld]
+bind-address = "$controller_mgmt_ip"
+
+default-storage-engine = innodb
+innodb_file_per_table = on
+max_connections = 4096
+collation-server = utf8_general_ci
+character-set-server = utf8' >> /etc/mysql/mariadb.conf.d/99-openstack.cnf
+
+	#do the part where you perform the modifications on the files
+
+	service mysql restart
+
+	#tenho de ver o que isto do mysql_secure_installation
+	mysql_secure_installation
+
+	#Rabbit MQ
+	echo "Installing Rabbit MQ"
+	apt install -y rabbitmq-server
+	rabbitmqctl add_user openstack "$rabbit_pass"
+	rabbitmqctl set_permissions openstack ".*" ".*" ".*"
+
+	#Memcached
+	apt install -y memcached python-memcache
+	sed -i -e 's+127.0.0.1+'"$controller_mgmt_ip"'+g' /etc/memcached.conf
+	service memcached restart
+
+	
+	#Etcd
+	apt install -y etcd
+ 
+	sed -i -e 's+.*ETCD_NAME.*+ETCD_NAME="controller"+' /etc/default/etcd
+	sed -i -e 's+.*ETCD_DATA_DIR.*+ETCD_DATA_DIR="/var/lib/etcd"+' /etc/default/etcd
+	sed -i -e 's+.*ETCD_INITIAL_CLUSTER_STATE.*+ETCD_INITIAL_CLUSTER_STATE="new"+' /etc/default/etcd
+	sed -i -e 's+.*ETCD_INITIAL_CLUSTER_TOKEN.*+ETCD_INITIAL_CLUSTER_TOKEN="etcd-cluster-01"+' /etc/default/etcd
+	sed -i -e 's+.*ETCD_INITIAL_CLUSTER.*+ETCD_INITIAL_CLUSTER="controller=http://'"$controller_mgmt_ip"':2380+' /etc/default/etcd 
+	sed -i -e 's+.ETCD_INITIAL_ADVERTISE_PEER_URLS.*+ETCD_INITIAL_ADVERTISE_PEER_URLS="http://'"$controller_mgmt_ip"':2380+' /etc/default/etcd
+	sed -i -e 's+.ETCD_ADVERTISE_CLIENT_URLS.*+ETCD_ADVERTISE_CLIENT_URLS="http://'"$controller_mgmt_ip"':2379+' /etc/default/etcd 
+	sed -i -e 's+.*ETCD_LISTEN_PEER_URLS.*+ETCD_LISTEN_PEER_URLS="http://0.0.0.0:2380+' /etc/default/etcd
+	sed -i -e 's+.*ETCD_LISTEN_CLIENT_URLS.*+ETCD_CLIENT_CLIENT_URLS="http://'"$controller_mgmt_ip"':2379+' /etc/default/etcd
+
+	systemctl enable etcd
+	systemctl restart etcd
+	
+
+
+}
+
+#########################################################################################
+
+
+#Main
+
+for i in "$@"
+do
+case $i in
+    -t=*|--node-type=*)
+    NODE_TYPE="${i#*=}"
+    shift # past argument=value
+    ;;
+    -s=*|--services=*)
+    SERVICES="${i#*=}"
+    shift # past argument=value
+    ;;
+    -mn=*|--management-network-ip=*)
+    M_NET="${i#*=}"
+    shift # past argument=value
+    ;;
+    -h |--help)
+    install_requisites
+    ;;
+    --default)
+    DEFAULT=YES
+    shift # past argument with no value
+    ;;
+    *)
+         echo "God Dammit Leroy"
+    ;;
+esac
+done
+
+
+
+echo "NODE TYPE  = ${NODE_TYPE}"
+echo "SERVICES     = ${SERVICES}"
+echo "MANAGEMENT NETWORK    = ${M_NET}"
+echo "DEFAULT         = ${DEFAULT}"
+
+
+
